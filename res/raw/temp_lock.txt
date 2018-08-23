@@ -1,0 +1,116 @@
+P180613-01974, P180627-02129
+
+修改CL: 13638235
+
+
+
+Deadlock beacause SysUiBg thread and main thread are waiting for each other.
+SysUiBg thread  locked <0x046fa4ad> (a java.lang.Object) and waiting to lock <0x0bd369af> (a com.android.systemui.Dependency) held by  main thread.
+main thread locked <0x0bd369af> (a com.android.systemui.Dependency) and waiting to lock <0x046fa4ad> (a java.lang.Object) held by SysUiBg thread.
+
+SysUiBg线程持有<0x046fa4ad>对象，等待<0x0bd369af>对象，
+main线程持有<0x0bd369af>对象，等待<0x046fa4ad>对象，
+所以SysUiBg线程和main线程形成循环等待，导致死锁发生。
+
+
+
+
+
+这是一个典型的互相等待资源的死锁问题。
+
+死锁条件：
+1.互斥条件；
+2.至少有一个任务它必须持有一个资源且正在等待获取一个当前被别的任务持有的资源;
+3.资源不能被任务抢占；
+4.必须有循环等待。
+
+
+
+
+"main" prio=5 tid=1 Blocked
+  | group="main" sCount=1 dsCount=0 flags=1 obj=0x743d2bd8 self=0x7454ac4a00
+  | sysTid=2684 nice=0 cgrp=default sched=0/0 handle=0x7459cb39c8
+  | state=S schedstat=( 1297566090 336652088 1939 ) utm=97 stm=32 core=1 HZ=100
+  | stack=0x7ff5ce3000-0x7ff5ce5000 stackSize=8MB
+  | held mutexes=
+  at com.android.systemui.statusbar.policy.NetworkControllerImpl.addCallback(NetworkControllerImpl.java:728)
+  - waiting to lock <0x046fa4ad> (a java.lang.Object) held by thread 20
+  at com.android.systemui.statusbar.SignalClusterView.onAttachedToWindow(SignalClusterView.java:401)
+  at android.view.View.dispatchAttachedToWindow(View.java:18622)
+  at android.view.ViewGroup.dispatchAttachedToWindow(ViewGroup.java:3520)
+  at android.view.ViewGroup.addViewInner(ViewGroup.java:5162)
+  at android.view.ViewGroup.addView(ViewGroup.java:4953)
+  at android.view.ViewGroup.addView(ViewGroup.java:4893)
+  at com.android.systemui.statusbar.phone.StatusBar.reinflateSignalCluster(StatusBar.java:3085)
+  at com.android.systemui.statusbar.phone.StatusBar.inflateSignalClusters(StatusBar.java:3056)
+  at com.android.systemui.statusbar.phone.StatusBar.onDensityOrFontScaleChanged(StatusBar.java:2972)
+  at com.android.systemui.statusbar.phone.StatusBar.onConfigurationChanged(StatusBar.java:6671)
+  at com.android.systemui.statusbar.phone.StatusBar$36.onConfigChanged(StatusBar.java:1673)
+  at com.android.systemui.statusbar.phone.ConfigurationControllerImpl.lambda$-com_android_systemui_statusbar_phone_ConfigurationControllerImpl_1496(ConfigurationControllerImpl.java:40)
+  at com.android.systemui.statusbar.phone.-$Lambda$-k5BAGrfhYK4ZberDU0XchX3hS0$1.$m$0(unavailable:-1)
+  at com.android.systemui.statusbar.phone.-$Lambda$-k5BAGrfhYK4ZberDU0XchX3hS0$1.accept(unavailable:-1)
+  at java.util.ArrayList.forEach(ArrayList.java:1262)
+  at com.android.systemui.statusbar.phone.ConfigurationControllerImpl.onConfigurationChanged(ConfigurationControllerImpl.java:40)
+  at com.android.systemui.Dependency.lambda$-com_android_systemui_Dependency_17261(Dependency.java:379)
+  at com.android.systemui.-$Lambda$I2vXdvxuaXHgW_yDfz07zk_J_pA$60.$m$0(unavailable:-1)
+  at com.android.systemui.-$Lambda$I2vXdvxuaXHgW_yDfz07zk_J_pA$60.accept(unavailable:-1)
+  at java.util.stream.ForEachOps$ForEachOp$OfRef.accept(ForEachOps.java:184)
+  at java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:176)
+  at java.util.Iterator.forEachRemaining(Iterator.java:116)
+  at java.util.Spliterators$IteratorSpliterator.forEachRemaining(Spliterators.java:1801)
+  at java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:482)
+  at java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:472)
+  at java.util.stream.ForEachOps$ForEachOp.evaluateSequential(ForEachOps.java:151)
+  at java.util.stream.ForEachOps$ForEachOp.evaluateSequential(ForEachOps.java:148)
+  at java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:235)
+  at java.util.stream.ReferencePipeline.forEach(ReferencePipeline.java:419)
+  at com.android.systemui.Dependency.onConfigurationChanged(Dependency.java:378)
+  - locked <0x0bd369af> (a com.android.systemui.Dependency)
+  at com.android.systemui.SystemUIApplication.onConfigurationChanged(SystemUIApplication.java:284)
+  at android.app.ActivityThread.performConfigurationChanged(ActivityThread.java:5076)
+  at android.app.ActivityThread.handleConfigurationChanged(ActivityThread.java:5324)
+  at android.app.ActivityThread$H.handleMessage(ActivityThread.java:1818)
+  at android.os.Handler.dispatchMessage(Handler.java:105)
+  at android.os.Looper.loop(Looper.java:164)
+  at android.app.ActivityThread.main(ActivityThread.java:6944)
+  at java.lang.reflect.Method.invoke(Native method)
+  at com.android.internal.os.Zygote$MethodAndArgsCaller.run(Zygote.java:327)
+  at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1374)
+
+
+
+"SysUiBg" prio=5 tid=20 Blocked
+  | group="main" sCount=1 dsCount=0 flags=1 obj=0x13e87f40 self=0x7443cafa00
+  | sysTid=2864 nice=10 cgrp=default sched=0/0 handle=0x743731a4f0
+  | state=S schedstat=( 51240412 92681404 161 ) utm=4 stm=1 core=1 HZ=100
+  | stack=0x7437218000-0x743721a000 stackSize=1037KB
+  | held mutexes=
+  at com.android.systemui.Dependency.getDependencyInner(Dependency.java:-1)
+  - waiting to lock <0x0bd369af> (a com.android.systemui.Dependency) held by thread 1
+  at com.android.systemui.Dependency.getDependency(Dependency.java:383)
+  at com.android.systemui.Dependency.get(Dependency.java:456)
+  at com.android.systemui.util.SettingsHelper.getInstance(SettingsHelper.java:445)
+  at com.android.systemui.statusbar.policy.MobileSignalController.<init>(MobileSignalController.java:324)
+  at com.android.systemui.statusbar.policy.NetworkControllerImpl.setCurrentSubscriptions(NetworkControllerImpl.java:1096)
+  - locked <0x046fa4ad> (a java.lang.Object)
+  at com.android.systemui.statusbar.policy.NetworkControllerImpl.doUpdateMobileControllers(NetworkControllerImpl.java:1021)
+  at com.android.systemui.statusbar.policy.NetworkControllerImpl.updateMobileControllers(NetworkControllerImpl.java:971)
+  at com.android.systemui.statusbar.policy.NetworkControllerImpl.-wrap5(NetworkControllerImpl.java:-1)
+  at com.android.systemui.statusbar.policy.NetworkControllerImpl$SubListener.onSubscriptionsChanged(NetworkControllerImpl.java:2102)
+  at android.telephony.SubscriptionManager$OnSubscriptionsChangedListener$1.handleMessage(SubscriptionManager.java:418)
+  at android.os.Handler.dispatchMessage(Handler.java:105)
+  at android.os.Looper.loop(Looper.java:164)
+  at android.os.HandlerThread.run(HandlerThread.java:65)
+
+
+
+
+
+
+
+
+
+
+
+
+

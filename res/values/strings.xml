@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Display Assistant</string>
+    <string name="notification_wakeup_title">Keeping Screen On</string>
+    <string name="notification_wakeup_message">You can keep screen to be on all the time.</string>
+    <string name="notification_lock_title">Keeping Screen Locked</string>
+    <string name="notification_lock_message">You can keep screen locked to avoid being touched.</string>
+    <string name="notification_blue_light_filter_title">Blue light filter mirror</string>
+    <string name="notification_blue_light_filter_message_enabled">Blue light filter mirror is enabled.</string>
+    <string name="notification_blue_light_filter_message_disabled">Blue light filter mirror is disabled.</string>
+    <string name="grant_permission_overlay">Please allow [Display Assistant] to appear on top.</string>
+    <string name="grant_permission_and_try_again">Please grant permission, and try again!</string>
+    <string name="cool_color">COOL COLOR</string>
+    <string name="warm_color">WARM COLOR</string>
+</resources>

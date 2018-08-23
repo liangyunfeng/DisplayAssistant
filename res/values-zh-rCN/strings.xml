@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">屏幕助手</string>
+    <string name="notification_wakeup_title">保持屏幕常亮</string>
+    <string name="notification_wakeup_message">您可以让屏幕一直保持亮屏。</string>
+    <string name="notification_lock_title">屏幕锁定</string>
+    <string name="notification_lock_message">您已经锁定屏幕以防触碰屏幕。</string>
+    <string name="notification_blue_light_filter_title">蓝光滤镜</string>
+    <string name="notification_blue_light_filter_message_enabled">蓝光滤镜已经开启。</string>
+    <string name="notification_blue_light_filter_message_disabled">蓝光滤镜已经关闭。</string>
+    <string name="grant_permission_overlay">请允许 【屏幕助手】 显示在屏幕顶部</string>
+    <string name="grant_permission_and_try_again">应用程序需要对应权限</string>
+    <string name="cool_color">冷色温</string>
+    <string name="warm_color">暖色温</string>
+</resources>

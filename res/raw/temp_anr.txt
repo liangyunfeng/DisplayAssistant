@@ -1,0 +1,266 @@
+
+P170713-01248 P170713-01775
+
+[梁云枫 / Yunfeng Liang]
+那个ANR问题，现在的分析结果应该是系统繁忙，导致AMS运行慢，导致我们发生ANR
+
+[梁云枫 / Yunfeng Liang] - 10:40 
+AMS那边慢，还有一个原因是因为同步的地方太多，互相等待导致的
+
+[梁云枫 / Yunfeng Liang] - 10:40 
+例如等待Usercontroller都花了17s
+
+[梁云枫 / Yunfeng Liang] - 10:41 
+所以可能是usercontroller被很多进程调用，所以各个进程都在等待
+
+[梁云枫 / Yunfeng Liang] - 10:41 
+我分析后，结果如下：
+
+
+
+07-11 20:35:22.954  1100 14320 I dvm_lock_sample: [system_server,1,Binder:1100_1C,17734,ActivityManagerService.java,9573,UserController.java,1735,100]    // It locked here for 17s+
+07-11 20:35:22.957  1100 14270 I dvm_lock_sample: [system_server,0,Binder:1100_18,17951,ActivityManagerService.java,23207,UserController.java,1735,100] // It locked here for 17s+
+07-11 20:35:22.970  1100  6782 I dvm_lock_sample: [system_server,1,Binder:1100_C,5698,Parcel.java,2670,-,2670,100]
+07-11 20:35:22.991  1100 14323 I dvm_lock_sample: [system_server,1,Binder:1100_1F,20637,ActivityManagerService.java,23095,-,23095,100]    // It locked here for 20s+
+07-11 20:35:22.995  1100  1206 I am_broadcast_discard_filter: [0,227641557,android.intent.action.TIME_TICK,1,140422654]
+
+07-11 20:35:23.237  1100  1206 I am_anr  : [0,5878,com.android.systemui,953695757,Broadcast of Intent { act=android.intent.action.TIME_TICK flg=0x50000014 launchParam=MultiScreenLaunchParams { mDisplayId=0 mBaseDisplayId=0 mFlags=0 } (has extras) }]
+
+
+从以上log可以看出AMS是因为UserController被锁等待了17秒多，所以大概是在20:35:04左右UserController被锁住的，
+再分析SsystemUI的log，也是从20:35:04左右开始被锁住了，
+
+    Line 30948: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: viewName : servicebox_clock
+    Line 30949: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#start
+    Line 39757: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#end
+
+
+再根据以上log，可以知道SystemUI在这个servicebox_clock的Page中被locked住的，
+
+/android/frameworks/base/packages/Keyguard/sec_function/servicebox/src/com/android/keyguard/servicebox/pages/clock/KeyguardClockPage.java 
+
+268    @Override
+269    public void refreshViews() {
+270        refreshTime();
+271    }
+
+153    public void refreshTime() {
+162        if (mClockView != null)
+163            mClockView.refreshTime(KeyguardTimePatterns.clockView12, KeyguardTimePatterns.clockView24, KeyguardTimePatterns.dateView);    //调用KeyguardSingleClockView的refreshTime方法
+164    }
+
+
+
+
+
+
+
+/android/frameworks/base/packages/Keyguard/sec_function/servicebox/src/com/android/keyguard/servicebox/pages/clock/KeyguardSingleClockView.java 
+
+143    @Override
+144    public void refreshTime(String clock12, String clock24, String date) {
+155        mTimeHourView.setFormat12Hour(clock12Hour);
+156        mTimeHourView.setFormat24Hour(clock24Hour);
+157        mTimeMinView.setFormat12Hour(clock12Min);
+158        mTimeMinView.setFormat24Hour(clock24Min);
+159        mTimeColonView.setFormat12Hour(separator);
+160        mTimeColonView.setFormat24Hour(separator);
+161        mDateView.setFormat12Hour(date);
+162        mDateView.setFormat24Hour(date);                //调用了4次setFormat24Hour()方法和4次setFormat12Hour()方法
+170    }
+
+
+49    private KeyguardTextClockForUser mTimeHourView;        //KeyguardTextClockForUser和KeyguardTextClock都是继承TextClock的类
+50    private KeyguardTextClockForUser mTimeColonView;
+51    private KeyguardTextClockForUser mTimeMinView;
+52    private KeyguardTextClock mDateView;
+
+
+
+
+
+
+/android/frameworks/base/core/java/android/widget/TextClock.java 
+
+321    @RemotableViewMethod
+322    public void setFormat12Hour(CharSequence format) {
+325        chooseFormat();                                            //调用chooseFormat()
+327    }
+
+
+379    @RemotableViewMethod
+380    public void setFormat24Hour(CharSequence format) {
+383        chooseFormat();                                            //调用chooseFormat()
+385    }
+
+504    private void chooseFormat(boolean handleTicker) {
+505        final boolean format24Requested = is24HourModeEnabled();    //调用is24HourModeEnabled()
+508
+524    }
+
+432    public boolean is24HourModeEnabled() {
+433        if (mShowCurrentUserTime) {
+434            return DateFormat.is24HourFormat(getContext(), ActivityManager.getCurrentUser());    // 这里调用ActivityManager.getCurrentUser()，就会锁住AMS去调用UserController
+435        } else {
+436            return DateFormat.is24HourFormat(getContext());
+437        }
+438    }
+
+
+
+
+
+
+
+
+好像是因为我们在那时候调用了8次 ActivityManager.getCurrentUser()，所以Usercontroller锁定AMS对象，但是AMS中发广播的地方也需要锁住AMS对象，
+
+/android/frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java 
+
+9538    public IIntentSender getIntentSender(int type,
+9539            String packageName, IBinder token, String resultWho,
+9540            int requestCode, Intent[] intents, String[] resolvedTypes,
+9541            int flags, Bundle bOptions, int userId) {
+
+
+9573        synchronized(this) {
+9574            int callingUid = Binder.getCallingUid();
+9575            int origUserId = userId;
+9576            userId = mUserController.handleIncomingUser(Binder.getCallingPid(), callingUid, userId,        // 这里
+
+9603            } catch (RemoteException e) {
+9604                throw new SecurityException(e);
+9605            }
+9606        }
+
+
+23241    public void finishReceiver(IBinder who, int resultCode, String resultData,
+23242            Bundle resultExtras, boolean resultAbort, /* { AppCore *//*int flags*/int queueIndex/* AppCore } */) {
+
+                synchronized(this) {                                                                       //还有这里
+23255                /* { AppCore */
+23256                // this is GED code. SEC uses more number of broadcast queues than GED.
+23257                //BroadcastQueue queue = (flags & Intent.FLAG_RECEIVER_FOREGROUND) != 0
+23258                //        ? mFgBroadcastQueue : mBgBroadcastQueue;
+23259                //r = queue.getMatchingOrderedReceiver(who);
+23260                r = mBridge.getMatchingOrderedReceiver(who, queueIndex);
+23261                /* AppCore } */
+23262                if (r != null) {
+23263                    doNext = r.queue.finishReceiverLocked(r, resultCode,
+23264                        resultData, resultExtras, resultAbort, true);
+23265                }
+23266            }
+
+
+
+
+
+
+
+
+
+[梁云枫 / Yunfeng Liang]
+所以最后如果AMS和usercontroller修改不了，可能就需要keyguard来规避，或者直接修改TextClock中getCurrentUser()的方式
+
+[苏国伟 / Guowei Su] - 10:48                 
+改为不需要每次都去调用
+
+[梁云枫 / Yunfeng Liang] - 10:49 
+是的，可以参考statusbar的 
+/android/frameworks/base/packages/SystemUI/src/com/android/systemui/statusbar/policy/SplitClockView.java
+
+[苏国伟 / Guowei Su] - 10:49                 
+Noti 这边 云枫你上次不是改过吗， keyguard 这边可以参考着改
+
+[梁云枫 / Yunfeng Liang] - 10:49 
+不一样
+
+[梁云枫 / Yunfeng Liang] - 10:49 
+他们这边是一直每一分钟都调用：
+setFormat12Hour(separator);
+setFormat24Hour(separator);
+
+[梁云枫 / Yunfeng Liang] - 10:50 
+其实这个是在时区变化，语言变化，或者其它一些设置变化，才需要调用，不用每一分时间改变都调用一次
+
+[梁云枫 / Yunfeng Liang] - 10:50 
+/android/frameworks/base/packages/SystemUI/src/com/android/systemui/statusbar/policy/SplitClockView.java
+
+
+44    private BroadcastReceiver mIntentReceiver = new BroadcastReceiver() {
+45        @Override
+46        public void onReceive(Context context, Intent intent) {
+47            final String action = intent.getAction();
+48            if (Intent.ACTION_TIME_CHANGED.equals(action)
+49                    || Intent.ACTION_TIMEZONE_CHANGED.equals(action)
+50                    || Intent.ACTION_LOCALE_CHANGED.equals(action)
+51                    || Intent.ACTION_CONFIGURATION_CHANGED.equals(action)
+52                    || Intent.ACTION_USER_SWITCHED.equals(action)) {
+53                updatePatterns();
+54            }
+55        }
+56    };
+
+[梁云枫 / Yunfeng Liang] - 10:51 
+statusbar中只有这几种广播过来才会去调用
+
+[张飞来 / Feilai Zhang] - 10:54                 
+这个也是每分钟会调用吧，if (Intent.ACTION_TIME_CHANGED.equals(action)
+
+[梁云枫 / Yunfeng Liang] - 10:54 
+不会，这个是手动改时间的广播
+
+[苏国伟 / Guowei Su] - 10:55                 
+那改为 TIME_TICK ?
+
+[苏国伟 / Guowei Su] - 10:57                 
+keyguard 没有 接受 TIME_TICK 的广播吗
+
+[梁云枫 / Yunfeng Liang] - 10:57 
+TextClock中接收的
+
+[梁云枫 / Yunfeng Liang] - 10:58 
+keyguard中的类继承这个TextClock，所以不用重写
+
+[梁云枫 / Yunfeng Liang] - 11:03 
+我们在分析开机SystemUI显示慢的问题时，就已经发现系统繁忙时，ActivityManager.getCurrentUser()会耗时1~2秒
+
+[梁云枫 / Yunfeng Liang] - 11:04 
+这里ANR的时候，估计调用AMS的方法可能远远不止一两秒
+
+[张飞来 / Feilai Zhang] - 11:06                 
+keyguard这里的调用，就是通过TIME_TICK来的
+
+[梁云枫 / Yunfeng Liang] - 11:07 
+是的，但是TIME_TICK广播其实不需要去设置这个12小时，24小时制的[%OD]
+
+[苏国伟 / Guowei Su] - 11:07                 
+可以考虑是否可以传入  current user  给 textClock
+
+[梁云枫 / Yunfeng Liang] - 11:08 
+TextClock里面的TIME_TICK广播是更新时间，之后keyguard本身接收TIME_TICK广播又去设置一次24/12小时制
+
+[苏国伟 / Guowei Su] - 11:09                 
+确认下是不是完全重复， 完全重复的话就直接去掉
+
+[梁云枫 / Yunfeng Liang] - 11:09 
+    Line 30944: 07-11 20:35:04.558  5878  5878 D KeyguardUpdateMonitor: received broadcast android.intent.action.TIME_TICK, #start
+    Line 30945: 07-11 20:35:04.558  5878  5878 D KeyguardUpdateMonitor: received broadcast android.intent.action.TIME_TICK, #end
+    Line 30946: 07-11 20:35:04.559  5878  5878 D KeyguardUpdateMonitor: handleTimeUpdate#start : size=30
+    Line 30947: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: mPageCacheMap.size() : 2
+    Line 30948: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: viewName : servicebox_clock
+    Line 30949: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#start
+    Line 39757: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#end
+    Line 39758: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: viewName : servicebox_music
+    Line 39759: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#start
+    Line 39760: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#end
+    Line 39761: 07-11 20:35:10.845  5878  5878 D KeyguardUpdateMonitor: handleTimeUpdate#end
+
+[梁云枫 / Yunfeng Liang] - 11:11 
+这个地方的TIME_TICK不用去设置12/24小时制的，改成像SplitClockView.java那样，在收到一些和小时制有关的广播才需要设置小时制
+
+
+
+
+
+

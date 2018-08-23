@@ -1,0 +1,12 @@
+<resources>
+    <declare-styleable name="LockView">
+        <attr name="speed" format="float" />
+        <attr name="showCoordinateLine" format="boolean" />
+        <attr name="lockColor" format="color" />
+        <attr name="lockSize" format="integer" />
+        <attr name="state" format="integer">
+            <enum name="lock" value="0"/>
+            <enum name="unlock" value="2"/>
+        </attr>
+    </declare-styleable>
+</resources>

@@ -1,0 +1,1078 @@
+
+1.加log到CallbackHandler进行调试，发现是UI线程被阻塞了
+
+	/android/frameworks/base/packages/SystemUI/src/com/android/systemui/statusbar/policy/CallbackHandler.java 
+	
+158    public void setMobileDataIndicators(final IconState statusIcon, final IconState qsIcon,
+159            final int statusType, final int qsType, final boolean activityIn,
+160            final boolean activityOut, final int activityIcon, final int roamingIcon,
+161            final String typeContentDescription, final String description,
+162            final boolean isWide, final int subId) {
+		   Log.v("lyf","lyf : setMobileDataIndicators #post message : activityIcon = " + activityIcon);					//这里加log
+163        post(new Runnable() {
+164            @Override
+165            public void run() {
+166                for (SignalCallback signalCluster : mSignalCallbacks) {
+					   Log.v("lyf","lyf : setMobileDataIndicators #run message : activityIcon = " + activityIcon);		//这里加log
+167                    signalCluster.setMobileDataIndicators(statusIcon, qsIcon, statusType, qsType,
+168                            activityIn, activityOut, activityIcon, roamingIcon, typeContentDescription,
+169                            description, isWide, subId);
+170                }
+171            }
+172        });
+173    }
+
+07-08 15:32:37.839  1323  1612 V lyf     : lyf : setMobileDataIndicators #post message : activityIcon =  2130839292
+07-08 15:32:39.451  1323  1323 V lyf     : lyf : setMobileDataIndicators #run message : activityIcon = 2130839292		//开机时消息放到Handler中和执行消息耗费了2~3s，所以显示慢
+
+
+
+2.修改Binder加分析是系统通过Binder来与系统服务通信耗时时间，
+
+/android/frameworks/base/core/java/android/os/Binder.java 
+
+612 final class BinderProxy implements IBinder {
+
+620    public boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+621        Binder.checkParcel(this, code, data, "Unreasonably large binder buffer");
+622        if (Binder.isTracingEnabled()) { Binder.getTransactionTracker().addTrace(); }
+623
+624        // NS-FLP++
+625        if (isMsgForGoogleLocation(data)) sendInfoToNSFLP(code, data);
+626        // NS-FLP--
+627
+629        final long start = System.currentTimeMillis(); 
+630        boolean result = transactNative(code, data, reply, flags); 
+631        final long end = System.currentTimeMillis(); 
+632        if (end - start > 20) {  
+634            Log.d("BinderProxy", "Transact time : " + (end - start), new RuntimeException()); 	//计算Binder通信时间和调用栈
+635        } 
+636        return result; 
+629    }
+
+
+log会打出：
+07-08 15:32:39.190  1323  1323 D BinderProxy: Transact time : 1050
+07-08 15:32:39.190  1323  1323 D BinderProxy: java.lang.RuntimeException
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at android.os.BinderProxy.transact(Binder.java:634)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at android.app.ActivityManagerProxy.isUserRunning(ActivityManagerNative.java:7073)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at android.os.UserManager.isUserUnlocked(UserManager.java:1155)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at com.android.keyguard.KeyguardUpdateMonitor.resolveNeedsSlowUnlockTransition(KeyguardUpdateMonitor.java:3021)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at com.android.keyguard.KeyguardUpdateMonitor.handleKeyguardReset(KeyguardUpdateMonitor.java:3017)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at com.android.keyguard.KeyguardUpdateMonitor.-wrap30(KeyguardUpdateMonitor.java)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at com.android.keyguard.KeyguardUpdateMonitor$2.handleMessage(KeyguardUpdateMonitor.java:561)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at android.os.Handler.dispatchMessage(Handler.java:102)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at android.os.Looper.loop(Looper.java:154)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at android.app.ActivityThread.main(ActivityThread.java:6823)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at java.lang.reflect.Method.invoke(Native Method)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at com.android.internal.os.ZygoteInit$MethodAndArgsCaller.run(ZygoteInit.java:1557)
+07-08 15:32:39.190  1323  1323 D BinderProxy: 	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1445)
+
+07-08 08:54:12.460  1324  1324 D BinderProxy: Transact time : 1437
+07-08 08:54:12.460  1324  1324 D BinderProxy: java.lang.RuntimeException
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.os.BinderProxy.transact(Binder.java:634)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.app.ActivityManagerProxy.getCurrentUser(ActivityManagerNative.java:7056)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.app.ActivityManager.getCurrentUser(ActivityManager.java:3937)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at com.android.systemui.recents.misc.SystemServicesProxy.getCurrentUser(SystemServicesProxy.java:1261)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at com.android.systemui.recents.Recents.onConfigurationChanged(Recents.java:669)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at com.android.systemui.SystemUIApplication.onConfigurationChanged(SystemUIApplication.java:226)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.app.ActivityThread.performConfigurationChanged(ActivityThread.java:5214)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.app.ActivityThread.handleConfigurationChanged(ActivityThread.java:5379)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:1777)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.os.Handler.dispatchMessage(Handler.java:102)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.os.Looper.loop(Looper.java:154)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at android.app.ActivityThread.main(ActivityThread.java:6823)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at java.lang.reflect.Method.invoke(Native Method)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at com.android.internal.os.ZygoteInit$MethodAndArgsCaller.run(ZygoteInit.java:1557)
+07-08 08:54:12.460  1324  1324 D BinderProxy: 	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1445)
+
+由以上的log，可以看出，原来是通过调用ActivityManager方法是，其通过Binder与ActivityManagerService通信时比较耗时。
+
+
+
+3.抓取开机的systrace进行分析，，为什么AMS阻塞
+  1).需要编译一个Root过的user版本，在以下3个文件中分别加入这一行：MTK_BUILD_ROOT = yes
+     这主要是为了再user版本中能用adb shell stop和adb shell start命令
+	 //NILE/Mojito/MT6757/android/system/core/adb/Android.mk
+	 //NILE/Mojito/MT6757/android/system/core/init/Android.mk
+	 //NILE/Mojito/MT6757/android/vendor/mediatek/proprietary/system/core/multi_init/Android.mk
+  2).烧完binary进入idle界面后，打开最新版SDK的Android Device Monitor，点击打开systrace按钮打开systrace设置界面
+     设置要抓取的时长，并设置buffer size(设置2048或者5120左右就可以，设置太大会出现栈溢出问题)。设置完后，先不要点击
+	 完成，因为点击完成就立刻开始抓取systrace了
+  3).打开cmd界面,输入并执行命令adb shell stop, 这是系统会停止，但是kernel还存活，所以样机还是连接着Android Device Monitor的，
+     再输入并执行命令db shell start,这时候，系统(不包括内核)开始重启,快要进入lockscreen界面的时候，点击systrace的完成按钮，
+	 开始抓取systrace，5秒后自动停止
+  4).等抓取完文件并默认保存为C:\Users\samsung\trace.html
+  5).打开Chrome流浪器(其它浏览器不行),输入chrome://tracing，再点击Load按钮，选择C:\Users\samsung\trace.html文件打开
+  6).可以通过A:向左; D:向右; W:放大; S:缩小; F:选择的详细信息；等快捷键来方便查看
+  
+通过systrace分析可知，SystemUI的UI Thread最长的耗时在transact,也就是Binder通过，步骤2的时候我们知道是与AMS通信耗时的，
+所以去看system_server的ActivityManagerService的进程使用情况，发现这个时间段，AMS被android.display占着，再看android.display线程，
+发现android.display线程在执行AMS 的 finishBooting 接口，再分析AMS 的 finishBooting 接口，发现慢在PackageManager：
+
+[段继宇 / Jiyu Duan] - 14:26                 
+07-13 14:23:09.096 V 1063     1090     PackageManager:                                                            reconcileAppsData for null u0 0x2 
+07-13 14:23:10.082 V 1063     1090     PackageManager:                                                            reconcileAppsData finished 307 packages
+
+[段继宇 / Jiyu Duan] - 14:27 
+finishBooting 应该是慢在这里了
+
+[段继宇 / Jiyu Duan] - 14:40                 
+finishBooting 这个慢在了mUserController.sendBootCompletedLocked()接口
+
+[梁云枫 / Yunfeng Liang] - 14:41 
+嗯
+
+[段继宇 / Jiyu Duan] - 14:41                 
+UserManagerService 会调用 PMS 的 reconcileAppsData
+
+[段继宇 / Jiyu Duan]
+这个接口慢
+
+
+
+   J7MAX      C7100      diff      
+boot event   time(ms)   delta   time(ms)   delta   time(ms)   delta   remarks
+mct was initialized in bl2   0    0    0    0    0    0    
+start_kernel_time   3428    3428    3678    3678    -250    -250    need to check bootloader team -> ?
+early   3474    46    3725    47    -251    -1    
+core   3479    5    3730    5    -251    0    
+postcore   3492    13    3742    12    -250    1    
+arch   3537    45    3788    46    -251    -1    
+subsys   3571    34    3822    34    -251    0    
+fs   3657    86    3907    85    -250    1    
+device   4099    442    4718    811    -619    -369    need to check kernel team -> ?
+late   4583    484    5129    411    -546    73    
+start init process   4585    2    5130    1    -545    1    
+Begin of preload   10517   5932    11687   6557    -1170    -625    need to check framework team -> juni99.kim
+End of preload      12908   2391    13499   1812    -591    579    
+Entered the Android system server!   13115   207    13685   186    -570    21    
+Start PackageManagerService   13747   632    14399   714    -652    -82    
+End PackageManagerService   18307   4560    19672   5273    -1365    -713     PMS team -> number of packages has increased.
+start networkManagement   21730   3423    23128   3456    -1398    -33    
+end networkManagement   21849   119    23270   142    -1421    -23    
+Loop forever       22749   900    24345   1075    -1596    -175    
+performEnableScreen   23469   720    25135   790    -1666    -70    
+Enabling Screen!   25191   1722    26912   1777    -1721    -55    
+bootcomplete   26621   1430    27894   982    -1273    448    
+
+
+
+Jeongsik Mun/System S/W R&D Group 1 / Comment  
+
+I have checked booting time of PackageManagerService.
+-----------------------------------------------------------------------------
+Start PackageManagerService   13747   632    14399   714    -652    -82    
+End PackageManagerService   18307   4560    19672   5273    -1365    -713     PMS team -> number of packages has increased.
+-----------------------------------------------------------------------------
+
+While booting, PackageManager works for scanning, reconciling and certificating apps installed.
+The difference between C7 and J7Max is that C7 has more apps installed in /data partition.
+
+PackageManager pass certification in case of /system partiton apps.
+but, in case of /data partition, PackageManager verify all files are signed with the first entry.
+because that PackageManager think it is untrusted package.
+so, data app takes more time than system app while certificating.
+
+The number of /data apps installed in C7100 is 27 and apps in J7MAX is 7.
+and The size of C7 apk files is about 500 Mbyte.
+
+if we want to decrease booting time in PackageManager, 
+we should remove apps in /data partion. 
+
+
+线索由： SystemUI -> ActivityManagerService -> UserController -> PackageManagerService
+
+
+
+4.ANR分析：                ------------P170713-01775-----------
+
+
+关键字： 
+dvm_lock_sample
+
+Long monitor contention with owner
+
+
+
+
+
+
+
+ANR问题分析指北：
+-------------------------------------------------------------------https://zhuanlan.zhihu.com/p/22272957----------------------------------------------------------------------------------
+
+07-11 20:35:22.957  1100 14270 I dvm_lock_sample: [system_server,0,Binder:1100_18,17951,ActivityManagerService.java,23207,UserController.java,1735,100]
+Eventlog中的dvm_lock_sample.
+在同步锁发生content的时候，虚拟机会将这个竞争记录在eventlog中：
+dvm_lock_sample: [system_server,1,Binder_7,    22,           ActivityManagerService.java,15921,-,9628,4]
+	                进程名     被block线程  block时间（ms）                          被block的行号 持有者行号
+实现可以参考art/runtime/monitor_android.cc LogContentionEvent函数
+如果主线程是被binder对端、被同步锁block，那么eventlog中就很有可能会有dvm_lock_sample的打印。
+华为项目上实现了更加强大的功能BlockMonitor，在主线程有耗时操作（如handlemsg、Binder调用耗时）的时候会打印出栈。
+
+定义： 
+dvm_lock_sample (process|3),(main|1|5),(thread|3),(time|1|3),(file|3),(line|1|5),(ownerfile|3),(ownerline|1|5),(sample_percent|1|6) 
+dvm_lock_sample会记录所有线程在java层（即dvm层）获取锁的记录。该log在获取到锁之后输出。 
+包括：所属进程，是否为主线程，线程名称，获取锁所用的时间，获取锁代码所在的源文件，行号，锁被占有的代码所在的源文件，行号，耗用时间所占比例。 
+如果ownerfile与file相同，用"-"表示。 
+
+Example: 
+11-25 14:14:24.140 I/dvm_lock_sample( 296): [system_server,0,Binder Thread #10,12515,PackageManagerService.java,1719,-,682,100] 
+含义：Binder Thread #10 ，非主线程，属于system_server进程，获取锁耗用了12s, PackageManagerService.java, line 1719获取锁，PackageManagerService.java，line 682占用了锁。
+
+
+
+
+
+定义
+
+主线程在特定的时间内没有做完特定的事情
+
+常见的场景
+
+   A.input事件超过5S没有处理完成
+   B.service executing 超时（bind，create，start，unbind等等），前台20s，后台200s
+   C.广播处理超时，前台10S，后台60s
+   D.ContentProvider执行超时，20s
+
+
+常见的原因
+
+        A.耗时操作，如复杂的layout，庞大的for循环，IO等。
+	B.被Binder 对端block
+	C.被子线程同步锁block
+        D.Binder被占满导致主线程无法和SystemServer通信
+	E.得不到系统资源（CPU/RAM/IO）
+	其中ABCD比较好分析，而E比较困难。
+
+
+如何分析？
+
+指导思想：通过各种线索，寻求主线程在过去一段时间内发生block的可能原因。
+
+线索包括：
+   A.traces.txt/dropbox
+     AMS在ANR发生的时候，dump相关进程（ANR的进程、systemserver、mediaserver，surfaceFinger等）的当前栈到traces.txt。
+     traces.txt存在的几种形式：
+     1. adb pull /data/anr/
+     2. slog/2012xxxxx/misc/anr/snapshot_xxxx.log
+     3. slog/dropbox/data_app_anr_xxxxx.tgz
+     4. slog/dropbox/system_app_anr_xxxx.tgz
+     需要注意的是，traces.txt是抓取的是超时后（如input超时就是5s后）的snapshot，并不一定能够真实的反应出block的点。
+	   也存在抓到主线程没有block，在idle的情况。
+   B.Eventlog中的dvm_lock_sample.
+     在同步锁发生content的时候，虚拟机会将这个竞争记录在eventlog中：
+	 dvm_lock_sample: [system_server,1,Binder_7,    22,           ActivityManagerService.java,15921,-,9628,4]
+	                   进程名           被block线程  block时间（ms）  被block的行号                       持有者行号
+	实现可以参考art/runtime/monitor_android.cc LogContentionEvent函数
+        如果主线程是被binder对端、被同步锁block，那么eventlog中就很有可能会有dvm_lock_sample的打印。
+     华为项目上实现了更加强大的功能BlockMonitor，在主线程有耗时操作（如handlemsg、Binder调用耗时）的时候会打印出栈。
+     
+   C.搜索主线程在发生ANR前后的main,systemlog，结合代码查看可能block在哪里。
+     现在发生ANR的时候，sprdruntimeinfo在mainlog中会Dump出比较多的信息，其中比较重要的是binder、cpu。
+   D.ANR发生的时候，打印出的CPU的占用。
+     注意，并不能因为有进程cpu占用高就果断的去怀疑他。
+   因为最主要的线索traces.txt的有效性并不是非常高，所以ANR问题分析是存在一定的局限性的。 
+
+
+
+
+
+
+
+8.0、ANR基础
+-------------------------------------------------------------http://blog.sina.com.cn/s/blog_c0de2be70102wd1k.html--------------------------------------------------------------------------
+
+
+1、ANR basic knowledge
+ANR分类： 
+Key Dispatch Timeout
+Service Timeout
+Broadcast Timeout
+关键词： 
+event log: “am_anr”
+trace.txt -java
+ -native
+CPU usage ago
+CPU usage later
+iowait
+“Early ANR” = The first ANR
+2、How to read Event Log
+一些信息没有在logcat log中而是在event log中，查看event log对与解决ANR问题很有帮助。 
+1) event log定义: event.logtags
+ ( in code path /system/core/logcat/event.logtags )
+ ( in phone path /system/etc/event-log-tags )
+event.logtags:
+ 30008 am_anr (pid|1|5),(Package Name|3),(Flags|1|5),(reason|3)
+ Source Code ActivityManagerService.java:
+ EventLog.writeEvent(EventLogTags.AM_ANR, app.pid, app.processName...))
+2) Log Example:
+ I/am_anr ( 1776): [3274,com.sonyericsson.home,572997,keyDispatchingTimedOut]
+3) Event: am_anr
+ system/core/logcat/event.logtags
+52004 binder_sample (descriptor|3),(method_num|1|5),(time|1|3),(blocking_package|3),(sample_percent|1|6)
+# Application Not Responding
+ 30008 am_anr (pid|1|5),(Package Name|3),(Flags|1|5),(reason|3)
+ I/am_anr ( 1776): [3274,com.sonyericsson.home,572997,keyDispatchingTimedOut]
+4) 重要的event log标志： 
+db_sample
+content_query_sample
+content_update_sample
+binder sample
+dvm_lock_sample
+Activity Event Series： 
+am_proc_start
+am_restart_activity
+am_on_resume_called
+am_finish_activity
+am_pause_activity
+am_on_paused_called
+am_destroy_activity
+5) Database related： 
+ 定义： 
+ 52000 db_sample (db|3),(sql|3),(time|1|3),(blocking_package|3), (sample_percent|1|6)
+ # Database operation samples.
+ # db: 数据库文件名 
+ # sql: the executed query (without query args)
+ # time: cpu time millis (not wall time), including lock acquisition
+ # blocking_package: if this is on a main thread, the package name, otherwise ""
+ # sample_percent: the percent likelihood this query was logged (based on 500ms)
+sample_percent? If time >= 500ms, then sample_percent show 100.
+例子1： 
+I/db_sample(27898): [/data/data/com.facebook.katana/databases/fb.db,INSERT INTO cache(value, timestamp, name) VALUES(?, ?, ?);,99,com.facebook.katana,20]
+信息解析： 
+Database: /data/data/com.facebook.katana/databases/fb.db
+Sql: INSERT INTO cache(value, timestamp, name) VALUES(?, ?, ?)
+Time spent: 99ms
+This database operation runs in com.facebook.katana main thread.
+例子2:
+I/db_sample(26092): [/data/data/com.google.android.gm/databases/XX@YY,COMMIT;DELETE FROM messages WHERE conversation = ? AND synced = ,797,,100]
+6) Events : binder_sample
+定义： 
+52004 binder_sample (descriptor|3),(method_num|1|5),(time|1|3),(blocking_package|3),(sample_percent|1|6)
+descriptor：接口描述符（任何一个binder都实现一个接口，IPC调用用的API，任何一个接口都有一个描述符，即一个字符串） 
+method_num：调用的方法的序列号 
+time：该方法调用耗用的时间 (从client端发起到server端完成并返回） 
+blocking_package：从哪个进程发起的调用 
+例子： 
+I/binder_sample(  520): [com.android.internal.telephony.ITelephonyRegistry,7,12518,com.android.phone,100]
+含义：从com.android.phone主线程发起了一个ITelephonyRegistry接口的第7个方法的binder调用，耗时12s。 
+（从后面的源代码可知，系统只记录从主线程发起的binder通讯） 
+查可知有ITelephonyRegistry.aidl，系统编译后会自动生成ITelephonyRegistry.java文件，里面定义了方法的序号。 
+out/target/common/obj/JAVA_LIBRARIES/framework_intermediates/src/telephony/java/com/android/internal/telephony/ITelephonyRegistry.java
+private static final java.lang.String DESCRIPTOR = "com.android.internal.telephony.ITelephonyRegistry";
+static final int TRANSACTION_listen = (android.os.IBinder.FIRST_CALL_TRANSACTION + 0);
+static final int TRANSACTION_notifyCallState = (android.os.IBinder.FIRST_CALL_TRANSACTION + 1);
+......
+static final int TRANSACTION_notifyDataConnection = (android.os.IBinder.FIRST_CALL_TRANSACTION + 7);
+由此知第7个方法是notifyDataConnection()
+7) Events : dvm_lock_sample
+定义： 
+dvm_lock_sample (process|3),(main|1|5),(thread|3),(time|1|3),(file|3),(line|1|5),(ownerfile|3),(ownerline|1|5),(sample_percent|1|6)
+dvm_lock_sample会记录所有线程在java层（即dvm层）获取锁的记录。该log在获取到锁之后输出。 
+包括：所属进程，是否为主线程，线程名称，获取锁所用的时间，获取锁代码所在的源文件，行号，锁被占有的代码所在的源文件，行号，耗用时间所占比例。 
+如果ownerfile与file相同，用"-"表示。 
+Example:
+11-25 14:14:24.140 I/dvm_lock_sample( 296): [system_server,0,Binder Thread #10,12515,
+ PackageManagerService.java,1719,-,682,100]
+含义：Binder Thread #10 ，非主线程，属于system_server进程，获取锁耗用了12s, PackageManagerService.java, line 1719获取锁，PackageManagerService.java，line 682占用了锁。 
+3、OOM
+ Memory leak will cause ANR. Because when memory is low, normal operations will be blocked for lack of memory or wait GC to collect memory, this will make normal operations taking much more time than before. Low memory will cause system into very bad performance, ANR occurrence rate will increase greatly in this condition. You will see many out of memory issues are along with ANR issues.
+ If you see frequent ANR occurs in short time and system is in OOM condition. These ANRs often can be ignored. We should put effert on fixing memory leak. When the memory leak is fixed, these ANRs should disappear.
+ There are 2 kinds of OOM. One is OOM in one dvm process. Another is system overall memory is not enough.
+1) OOM in one dvm process
+One process, one dvm, one GC.
+Dvm heap limit in ICS: Change from dalvik.vm.heapsize to dalvik.vm.heapgrowthlimit (64Mb now in ginger fuji ICS)
+D/dalvikvm( 216): GC_CONCURRENT freed 4443K, 54% free 28546K/61347K, paused 4ms+20ms
+ 系统为进程216分配了61347K的dvm heap，有54% free，分母代表了历史上对Heap的最大需求。 
+D/dalvikvm( 3142): GC_BEFORE_OOM freed 10K, 2% free 64421K/65571K, paused 258msE/dalvikvm-heap( 3142): Out of memory on a 335888-byte allocation.
+2) System overall OOM
+Kernel oom killer – when there is no enough memory for allocating.
+内核kernel log:
+init invoked oom-killer: gfp_mask=0xd0, order=2, oom_adj=-16, oom_score_adj=-941
+[] (>] (pgd_alloc+0x14/0xe0)
+...... unwind_backtrace+0x0/0x12c) from [] (dump_header.clone.1+0xd8/0x22c)
+] (dump_header.clone.1+0xd8/0x22c) from [] (oom_kill_process.clone.0+0x40/0x33c)
+[] (oom_kill_process.clone.0+0x40/0x33c) from [] (out_of_memory+0x328/0x458)
+[] (out_of_memory+0x328/0x458) from [] (__alloc_pages_nodemask+0x4a0/0x608)
+[] (__alloc_pages_nodemask+0x4a0/0x608) from [] (__get_free_pages+0x10/0x24)
+[] (__get_free_pages+0x10/0x24) from [
+[] (sys_fork+0x28/0x2c) from [] (ret_fast_syscall+0x0/0x30)
+ 
+……
+ 
+Out of memory: Kill process 22591 (ckscreen.uxpnxt) score 754 or sacrifice child
+ 
+Killed process 22591 (ckscreen.uxpnxt) total-vm:466932kB, anon-rss:23168kB, file-rss:8396kB
+Android Low memory killer – when memory decrease to some value. So, it doesn’t mean memory is used up.
+ 
+select 1381 (android.browser), adj 7, size 22194, to kill
+ 
+select 18759 (ndroid.crashsms), adj 8, size 7129, to kill
+ 
+send sigkill to 18759 (ndroid.crashsms), adj 8, size 7129
+
+
+
+
+
+
+说说Android的广播(4) - 前台广播为什么比后台广播快？   
+-----------------------------------------------------------------------http://blog.csdn.net/lusing/article/details/51614173-----------------------------------------------------------------------------
+
+BroadcastRecord中的几个时间点
+
+既然是分析超时，我们先对BroadcastRecord中记录的几个时间点有个印象。
+
+long enqueueClockTime;  // the clock time the broadcast was enqueued
+long dispatchTime;      // when dispatch started on this set of receivers
+long dispatchClockTime; // the clock time the dispatch started
+long receiverTime;      // when current receiver started for timeouts.
+long finishTime;        // when we finished the broadcast.1
+
+
+其中最绕的是dispatchTime和dispatchClockTime，都是开始分发消息时的时间，它们有什么不同呢？
+
+其实，它们的区别仅仅是计时方法不同：
+
+r.dispatchTime = SystemClock.uptimeMillis();
+r.dispatchClockTime = System.currentTimeMillis();1
+
+
+其他的时间也都一样，凡是叫ClockTime的都是System.currentTimeMillis()，只叫Time的，就是SystemClock.uptimeMillis().
+
+我们看下它们的实际赋值，加深一下印象： 
+ClockTime就这两个：
+
+r.enqueueClockTime = System.currentTimeMillis();
+r.dispatchClockTime = System.currentTimeMillis();1
+
+
+非Clock的Time有三个：
+
+r.dispatchTime = SystemClock.uptimeMillis();
+r.receiverTime = SystemClock.uptimeMillis();
+r.finishTime = SystemClock.uptimeMillis();1
+
+
+
+这里举个例子：
+Historical broadcasts [foreground]		//前台
+  Historical Broadcast foreground #4:
+    BroadcastRecord{f2c2318 u-1 android.intent.action.TIME_TICK to user -1
+    Intent { act=android.intent.action.TIME_TICK flg=0x50000014 launchParam=MultiScreenLaunchParams { mDisplayId=0 mBaseDisplayId=0 mFlags=0 } (has extras) }
+    caller=android null pid=-1 uid=1000
+    enqueueClockTime=2017-06-08 18:30:11.064 dispatchClockTime=2017-06-08 18:30:11.091		//压栈时间点和分发时间点,如果分发时间点和压栈时间点间隔很长，那应该就是AMS繁忙
+    dispatchTime=-3m50s596ms (+27ms since enq) finishTime=-3m11s676ms (+38s920ms since disp)	// dispatchTime(从压栈到分发耗费的时间)，finishTime(从分发到所有接收广播的地方都处理完广播耗费的总时间)
+    anrCount=1
+    resultTo=null resultCode=0 resultData=null
+    resultAbort=false ordered=true sticky=false initialSticky=false
+    nextReceiver=13 receiver=null
+    Deliver #0: BroadcastFilter{ed876c u0 ReceiverList{a8a381f 1043 system/1000/u0 local:com.android.server.AlarmManagerService$ClockReceiver@f193679,6eb3fbe}}, [disp=-3m50s596ms, fin=-3m50s580ms, dur=+16ms]
+    Timeout #1: BroadcastFilter{db462af u0 ReceiverList{db03a8e 1282 com.android.systemui/10008/u0 remote:d5d1a89}}, [disp=-3m50s578ms, fin=-3m12s379ms, dur=+38s199ms]
+    Deliver #2: BroadcastFilter{38b1c36 u-1 ReceiverList{c4559d1 1282 com.android.systemui/10008/u-1 remote:34ff0f8}}, [disp=-3m12s335ms, fin=-3m12s208ms, dur=+127ms]
+    Deliver #3: BroadcastFilter{7fb9e59 u-1 ReceiverList{969d2a0 1282 com.android.systemui/10008/u-1 remote:d309fa3}}, [disp=-3m12s208ms, fin=-3m12s56ms, dur=+152ms]
+    Deliver #4: BroadcastFilter{2c46c67 u0 ReceiverList{be7f826 11473 com.sec.android.daemonapp/10153/u0 remote:73d6f81}}, [disp=-3m12s50ms, fin=-3m12s12ms, dur=+38ms]
+    Deliver #5: BroadcastFilter{9ba804f u0 ReceiverList{1ebcaae 1282 com.android.systemui/10008/u0 remote:d4a5729}}, [disp=-3m12s12ms, fin=-3m11s914ms, dur=+98ms]
+    Deliver #6: BroadcastFilter{35a17d0 u0 ReceiverList{82efb93 1282 com.android.systemui/10008/u0 remote:f2bd882}}, [disp=-3m11s914ms, fin=-3m11s906ms, dur=+8ms]
+    Deliver #7: BroadcastFilter{fc3bdef u0 ReceiverList{7c2face 1282 com.android.systemui/10008/u0 remote:b7db3c9}}, [disp=-3m11s906ms, fin=-3m11s901ms, dur=+5ms]
+    Deliver #8: BroadcastFilter{997f5da u0 ReceiverList{aa4c385 1282 com.android.systemui/10008/u0 remote:10e0fc}}, [disp=-3m11s900ms, fin=-3m11s732ms, dur=+168ms]
+    Skipped #9: BroadcastFilter{b8f95a6 u0 ReceiverList{3731301 1282 com.android.systemui/10008/u0 remote:50910e8}}, [disp=--, fin=--, dur=--]
+    Skipped #10: BroadcastFilter{96a3f1d u0 ReceiverList{d472bf4 1282 com.android.systemui/10008/u0 remote:a38f9c7}}, [disp=--, fin=--, dur=--]
+    Skipped #11: BroadcastFilter{e25ee78 u0 ReceiverList{80ee3db 1282 com.android.systemui/10008/u0 remote:8c494ea}}, [disp=--, fin=--, dur=--]
+    Skipped #12: BroadcastFilter{38de2b7 u0 ReceiverList{acf15b6 1282 com.android.systemui/10008/u0 remote:d9f4951}}, [disp=--, fin=--, dur=--]
+
+
+
+
+
+
+
+
+
+
+
+	
+"main" prio=5 tid=1 Native
+  | group="main" sCount=1 dsCount=0 obj=0x7684b788 self=0xed885e00
+  | sysTid=5878 nice=0 cgrp=default sched=0/0 handle=0xf0e6e534
+  | state=S schedstat=( 0 0 0 ) utm=53236 stm=9085 core=2 HZ=100
+  | stack=0xff71b000-0xff71d000 stackSize=8MB
+  | held mutexes=
+  kernel: __switch_to+0x8c/0xa8
+  kernel: SyS_epoll_wait+0x3d0/0x4b8
+  kernel: compat_SyS_epoll_pwait+0x118/0x120
+  kernel: __sys_trace_return+0x0/0x4
+  native: #00 pc 0006441c  /system/lib/libc.so (__epoll_pwait+20)
+  native: #01 pc 0001aeb4  /system/lib/libc.so (epoll_pwait+68)
+  native: #02 pc 0001aef4  /system/lib/libc.so (epoll_wait+20)
+  native: #03 pc 00011c8f  /system/lib/libutils.so (_ZN7android6Looper9pollInnerEi+118)
+  native: #04 pc 00011b8b  /system/lib/libutils.so (_ZN7android6Looper8pollOnceEiPiS1_PPv+26)
+  native: #05 pc 00098441  /system/lib/libandroid_runtime.so (_ZN7android18NativeMessageQueue8pollOnceEP7_JNIEnvP8_jobjecti+22)
+  native: #06 pc 007370fd  /system/framework/arm/boot-framework.oat (Java_android_os_MessageQueue_nativePollOnce__JI+96)
+  at android.os.MessageQueue.nativePollOnce(Native method)			//说明主线程现在是在空闲状态，可以看MessageQueue.nativePollOnce的源码学习
+  at android.os.MessageQueue.next(MessageQueue.java:323)
+  at android.os.Looper.loop(Looper.java:136)
+  at android.app.ActivityThread.main(ActivityThread.java:6823)
+  at java.lang.reflect.Method.invoke!(Native method)
+  at com.android.internal.os.ZygoteInit$MethodAndArgsCaller.run(ZygoteInit.java:1557)
+  at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1445)	
+	
+	
+	
+	
+	
+	
+	
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+	
+	
+	
+	
+	
+	
+	Line 29455: 07-11 20:35:03.516  1100  1206 W art     : Long monitor contention with owner Binder:1100_15 (7097) at boolean android.os.MessageQueue.enqueueMessage(android.os.Message, long)(MessageQueue.java:541) waiters=0 in android.os.Message android.os.MessageQueue.next() for 660ms
+	Line 29562: 07-11 20:35:03.597  1100  2473 W art     : Long monitor contention with owner Binder:1100_15 (7097) at int com.android.server.am.ActivityManagerService.broadcastIntent(android.app.IApplicationThread, android.content.Intent, java.lang.String, android.content.IIntentReceiver, int, java.lang.String, android.os.Bundle, java.lang.String[], int, android.os.Bundle, boolean, boolean, int)(ActivityManagerService.java:23095) waiters=0 in int com.android.server.am.PendingIntentRecord.sendInner(int, android.content.Intent, java.lang.String, android.content.IIntentReceiver, java.lang.String, android.os.IBinder, java.lang.String, int, int, int, android.os.Bundle, android.app.IActivityContainer, android.app.IApplicationThread) for 4.138s
+	Line 40172: 07-11 20:35:11.149  1100  5978 W art     : Long monitor contention with owner Binder:1100_15 (7097) at int com.android.server.am.ActivityManagerService.broadcastIntent(android.app.IApplicationThread, android.content.Intent, java.lang.String, android.content.IIntentReceiver, int, java.lang.String, android.os.Bundle, java.lang.String[], int, android.os.Bundle, boolean, boolean, int)(ActivityManagerService.java:23095) waiters=1 in java.util.List com.android.server.am.ActivityManagerService.getRunningAppProcesses() for 1.421s
+	Line 56667: 07-11 20:35:22.949  1100  1206 W art     : Long monitor contention with owner Binder:1100_9 (5978) at java.util.List com.android.server.am.ActivityManagerService.getRunningAppProcesses()(ActivityManagerService.java:17975) waiters=3 in void com.android.server.am.BroadcastQueue$BroadcastHandler.handleMessage(android.os.Message) for 9.305s
+	Line 56672: 07-11 20:35:22.950  1100  1209 W art     : Long monitor contention with owner Binder:1100_1B (21030) at boolean android.os.MessageQueue.enqueueMessage(android.os.Message, long)(MessageQueue.java:541) waiters=0 in android.os.Message android.os.MessageQueue.next() for 10.199s
+	Line 56682: 07-11 20:35:22.951  1100 14320 W art     : Long monitor contention with owner Binder:1100_A (6700) at android.content.pm.UserInfo com.android.server.am.UserController.getCurrentUser()(UserController.java:1735) waiters=3 in android.content.IIntentSender com.android.server.am.ActivityManagerService.getIntentSender(int, java.lang.String, android.os.IBinder, java.lang.String, int, android.content.Intent[], java.lang.String[], int, android.os.Bundle, int) for 17.734s
+	Line 56699: 07-11 20:35:22.954  1100 14270 W art     : Long monitor contention with owner Binder:1100_A (6700) at android.content.pm.UserInfo com.android.server.am.UserController.getCurrentUser()(UserController.java:1735) waiters=2 in void com.android.server.am.ActivityManagerService.finishReceiver(android.os.IBinder, int, java.lang.String, android.os.Bundle, boolean, int) for 17.951s
+	Line 56753: 07-11 20:35:22.970  1100  6782 W art     : Long monitor contention with owner Binder:1100_1E (14322) at android.os.Parcel android.os.Parcel.obtain(long)(Parcel.java:2670) waiters=0 in android.os.Parcel android.os.Parcel.obtain(long) for 5.698s
+	Line 56808: 07-11 20:35:22.991  1100 14323 W art     : Long monitor contention with owner Binder:1100_15 (7097) at int com.android.server.am.ActivityManagerService.broadcastIntent(android.app.IApplicationThread, android.content.Intent, java.lang.String, android.content.IIntentReceiver, int, java.lang.String, android.os.Bundle, java.lang.String[], int, android.os.Bundle, boolean, boolean, int)(ActivityManagerService.java:23095) waiters=2 in int com.android.server.am.ActivityManagerService.broadcastIntent(android.app.IApplicationThread, android.content.Intent, java.lang.String, android.content.IIntentReceiver, int, java.lang.String, android.os.Bundle, java.lang.String[], int, android.os.Bundle, boolean, boolean, int) for 20.637s
+	Line 60261: 07-11 20:35:24.173  1100 26142 W art     : Long monitor contention with owner Binder:1100_4 (5609) at void com.android.server.am.ActivityManagerService$AppDeathRecipient.binderDied()(ActivityManagerService.java:1865) waiters=2 in void com.android.server.am.ActivityManagerService.activityResumed(android.os.IBinder) for 107ms
+	Line 63382: 07-11 20:35:27.805  1100 14322 W art     : Long monitor contention with owner Binder:1100_F (6805) at android.content.pm.ParceledListSlice com.android.server.pm.PackageManagerService.getInstalledPackages(int, int)(PackageManagerService.java:8751) waiters=1 in int com.android.server.pm.PackageManagerService.checkUidPermission(java.lang.String, int) for 140ms
+
+
+	
+	
+	Cnt:17 ~ 134		//?
+	Magic:250 ~ 445		//?
+
+	Line 24542: 07-11 20:35:00.059   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:17 Frame:2 Magic:250 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:64 u4AvgYcur:58
+	Line 24694: 07-11 20:35:00.168   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:18 Frame:0 Magic:251 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:64 u4AvgYcur:58
+	Line 24894: 07-11 20:35:00.287   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:19 Frame:1 Magic:252 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:66 u4CwvYpre:64 u4AvgYcur:59
+	Line 25069: 07-11 20:35:00.407   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:20 Frame:2 Magic:253 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:66 u4CwvYpre:64 u4AvgYcur:59
+	Line 25244: 07-11 20:35:00.526   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:21 Frame:0 Magic:254 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:64 u4AvgYcur:58
+	Line 25436: 07-11 20:35:00.671   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:22 Frame:1 Magic:255 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:64 u4AvgYcur:58
+	Line 25602: 07-11 20:35:00.779   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:23 Frame:2 Magic:256 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:64 u4AvgYcur:58
+	Line 25787: 07-11 20:35:00.890   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:24 Frame:0 Magic:257 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:64 u4AvgYcur:57
+	Line 25948: 07-11 20:35:01.010   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:25 Frame:1 Magic:258 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:64 u4AvgYcur:57
+	Line 26118: 07-11 20:35:01.131   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:26 Frame:2 Magic:259 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:64 u4AvgYcur:57
+	Line 26282: 07-11 20:35:01.251   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:27 Frame:0 Magic:260 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:64 u4AvgYcur:57
+	Line 26451: 07-11 20:35:01.373   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:28 Frame:1 Magic:261 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:64 u4AvgYcur:59
+	Line 26615: 07-11 20:35:01.493   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:29 Frame:2 Magic:262 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:68 u4CwvYpre:64 u4AvgYcur:61
+	Line 26782: 07-11 20:35:01.616   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:1 Apply:1 Cnt:0 Frame:0 Magic:263 ReSchedule:1 Exit:0 Skip:0 bStatChange:1 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:69 u4CwvYpre:64 u4AvgYcur:61
+	Line 26966: 07-11 20:35:01.753   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:1 Cnt:1 Frame:1 Magic:264 ReSchedule:0 Exit:1 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:1 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:69 u4CwvYpre:69 u4AvgYcur:62
+	Line 27147: 07-11 20:35:01.857   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:1 Cnt:2 Frame:2 Magic:265 ReSchedule:0 Exit:1 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:2 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 27319: 07-11 20:35:01.990   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:1 Apply:1 Cnt:3 Frame:0 Magic:266 ReSchedule:0 Exit:1 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:3 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:69 u4CwvYpre:69 u4AvgYcur:62
+	Line 27496: 07-11 20:35:02.114   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:4 Frame:1 Magic:267 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:67 u4CwvYpre:69 u4AvgYcur:60
+	Line 27657: 07-11 20:35:02.223   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:5 Frame:2 Magic:268 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:66 u4CwvYpre:69 u4AvgYcur:59
+	Line 27818: 07-11 20:35:02.339   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:6 Frame:0 Magic:269 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:66 u4CwvYpre:69 u4AvgYcur:59
+	Line 27987: 07-11 20:35:02.458   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:7 Frame:1 Magic:270 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:69 u4AvgYcur:58
+	Line 28150: 07-11 20:35:02.576   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:8 Frame:2 Magic:271 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:69 u4AvgYcur:58
+	Line 28301: 07-11 20:35:02.697   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:9 Frame:0 Magic:272 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:69 u4AvgYcur:58
+	Line 28476: 07-11 20:35:02.828   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:10 Frame:1 Magic:273 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:69 u4AvgYcur:58
+	Line 28652: 07-11 20:35:02.937   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:11 Frame:2 Magic:274 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:69 u4AvgYcur:58
+	Line 28812: 07-11 20:35:03.057   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:12 Frame:0 Magic:275 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:67 u4CwvYpre:69 u4AvgYcur:59
+	Line 28981: 07-11 20:35:03.181   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:13 Frame:1 Magic:276 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:67 u4CwvYpre:69 u4AvgYcur:60
+	Line 29149: 07-11 20:35:03.300   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:14 Frame:2 Magic:277 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:66 u4CwvYpre:69 u4AvgYcur:59
+	Line 29317: 07-11 20:35:03.421   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:15 Frame:0 Magic:278 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:66 u4CwvYpre:69 u4AvgYcur:59
+	Line 29489: 07-11 20:35:03.541   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:16 Frame:1 Magic:279 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:67 u4CwvYpre:69 u4AvgYcur:60
+	Line 29646: 07-11 20:35:03.662   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:17 Frame:2 Magic:280 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:67 u4CwvYpre:69 u4AvgYcur:60
+	Line 29828: 07-11 20:35:03.782   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:18 Frame:0 Magic:281 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:67 u4CwvYpre:69 u4AvgYcur:60
+	Line 30015: 07-11 20:35:03.904   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:19 Frame:1 Magic:282 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:67 u4CwvYpre:69 u4AvgYcur:60
+	Line 30185: 07-11 20:35:04.024   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:20 Frame:2 Magic:283 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:73 u4CwvYpre:69 u4AvgYcur:65
+	Line 30367: 07-11 20:35:04.147   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:21 Frame:0 Magic:284 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:72 u4CwvYpre:69 u4AvgYcur:64
+	Line 30534: 07-11 20:35:04.264   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:22 Frame:1 Magic:285 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:71 u4CwvYpre:69 u4AvgYcur:63
+	Line 30698: 07-11 20:35:04.392   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:23 Frame:2 Magic:286 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 30869: 07-11 20:35:04.516   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:24 Frame:0 Magic:287 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:71 u4CwvYpre:69 u4AvgYcur:63
+	Line 31046: 07-11 20:35:04.631   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:25 Frame:1 Magic:288 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:72 u4CwvYpre:69 u4AvgYcur:64
+	Line 31217: 07-11 20:35:04.748   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:26 Frame:2 Magic:289 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:71 u4CwvYpre:69 u4AvgYcur:63
+	Line 31393: 07-11 20:35:04.868   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:27 Frame:0 Magic:290 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 31559: 07-11 20:35:04.987   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:28 Frame:1 Magic:291 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 31740: 07-11 20:35:05.109   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:29 Frame:2 Magic:292 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 31907: 07-11 20:35:05.230   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:30 Frame:0 Magic:293 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:71 u4CwvYpre:69 u4AvgYcur:63
+	Line 32072: 07-11 20:35:05.353   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:31 Frame:1 Magic:294 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:71 u4CwvYpre:69 u4AvgYcur:63
+	Line 32211: 07-11 20:35:05.467   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:32 Frame:2 Magic:295 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:72 u4CwvYpre:69 u4AvgYcur:64
+	Line 32404: 07-11 20:35:05.593   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:33 Frame:0 Magic:296 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:73 u4CwvYpre:69 u4AvgYcur:65
+	Line 32562: 07-11 20:35:05.710   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:34 Frame:1 Magic:297 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:73 u4CwvYpre:69 u4AvgYcur:65
+	Line 32762: 07-11 20:35:05.831   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:35 Frame:2 Magic:298 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:73 u4CwvYpre:69 u4AvgYcur:65
+	Line 32927: 07-11 20:35:05.954   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:36 Frame:0 Magic:299 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:72 u4CwvYpre:69 u4AvgYcur:64
+	Line 33089: 07-11 20:35:06.072   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:37 Frame:1 Magic:300 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:72 u4CwvYpre:69 u4AvgYcur:64
+	Line 33249: 07-11 20:35:06.193   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:38 Frame:2 Magic:301 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 33410: 07-11 20:35:06.314   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:39 Frame:0 Magic:302 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 33568: 07-11 20:35:06.434   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:40 Frame:1 Magic:303 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 33757: 07-11 20:35:06.557   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:41 Frame:2 Magic:304 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 33926: 07-11 20:35:06.678   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:42 Frame:0 Magic:305 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:61
+	Line 34098: 07-11 20:35:06.797   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:43 Frame:1 Magic:306 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:69 u4CwvYpre:69 u4AvgYcur:61
+	Line 34268: 07-11 20:35:06.918   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:44 Frame:2 Magic:307 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:70 u4CwvYpre:69 u4AvgYcur:62
+	Line 34449: 07-11 20:35:07.037   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:45 Frame:0 Magic:308 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:73 u4CwvYpre:69 u4AvgYcur:64
+	Line 34605: 07-11 20:35:07.156   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:1 Apply:1 Cnt:0 Frame:0 Magic:309 ReSchedule:1 Exit:0 Skip:0 bStatChange:1 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:75 u4CwvYpre:69 u4AvgYcur:67
+	Line 34777: 07-11 20:35:07.279   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:1 Cnt:1 Frame:1 Magic:310 ReSchedule:0 Exit:0 Skip:0 bStatChange:1 bAAASchedule:0 framePerAECycle:3 Stable:0 AEMonitorStable:0 VdCnt:1 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:75 u4CwvYpre:69 u4AvgYcur:67
+	Line 34947: 07-11 20:35:07.411   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:1 Cnt:2 Frame:2 Magic:311 ReSchedule:0 Exit:0 Skip:0 bStatChange:1 bAAASchedule:0 framePerAECycle:3 Stable:0 AEMonitorStable:0 VdCnt:2 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:74 u4CwvYpre:69 u4AvgYcur:66
+	Line 35092: 07-11 20:35:07.517   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:1 Apply:1 Cnt:3 Frame:0 Magic:312 ReSchedule:0 Exit:0 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:0 AEMonitorStable:0 VdCnt:3 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:69 u4AvgYcur:58
+	Line 35256: 07-11 20:35:07.637   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:1 Cnt:4 Frame:1 Magic:313 ReSchedule:0 Exit:1 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:1 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:65 u4CwvYpre:65 u4AvgYcur:58
+	Line 35428: 07-11 20:35:07.757   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:1 Cnt:5 Frame:2 Magic:314 ReSchedule:0 Exit:1 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:2 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:65 u4AvgYcur:57
+	Line 35628: 07-11 20:35:07.881   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:1 Apply:1 Cnt:6 Frame:0 Magic:315 ReSchedule:0 Exit:1 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:3 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:65 u4AvgYcur:56
+	Line 35798: 07-11 20:35:08.000   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:7 Frame:1 Magic:316 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 35958: 07-11 20:35:08.121   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:8 Frame:2 Magic:317 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 36111: 07-11 20:35:08.240   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:9 Frame:0 Magic:318 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 36293: 07-11 20:35:08.368   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:10 Frame:1 Magic:319 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 36454: 07-11 20:35:08.481   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:11 Frame:2 Magic:320 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 36617: 07-11 20:35:08.606   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:12 Frame:0 Magic:321 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 36782: 07-11 20:35:08.725   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:13 Frame:1 Magic:322 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 36980: 07-11 20:35:08.846   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:14 Frame:2 Magic:323 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 37149: 07-11 20:35:08.967   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:15 Frame:0 Magic:324 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 37311: 07-11 20:35:09.091   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:16 Frame:1 Magic:325 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 37472: 07-11 20:35:09.207   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:17 Frame:2 Magic:326 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 37620: 07-11 20:35:09.327   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:18 Frame:0 Magic:327 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 37791: 07-11 20:35:09.446   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:19 Frame:1 Magic:328 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 37953: 07-11 20:35:09.567   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:20 Frame:2 Magic:329 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 38125: 07-11 20:35:09.687   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:21 Frame:0 Magic:330 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 38290: 07-11 20:35:09.812   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:22 Frame:1 Magic:331 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 38455: 07-11 20:35:09.927   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:23 Frame:2 Magic:332 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 38659: 07-11 20:35:10.058   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:24 Frame:0 Magic:333 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 38806: 07-11 20:35:10.169   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:25 Frame:1 Magic:334 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 38973: 07-11 20:35:10.292   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:26 Frame:2 Magic:335 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 39137: 07-11 20:35:10.411   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:27 Frame:0 Magic:336 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 39294: 07-11 20:35:10.531   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:28 Frame:1 Magic:337 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 39466: 07-11 20:35:10.659   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:29 Frame:2 Magic:338 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 39644: 07-11 20:35:10.775   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:30 Frame:0 Magic:339 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 39831: 07-11 20:35:10.891   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:31 Frame:1 Magic:340 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 39990: 07-11 20:35:11.014   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:32 Frame:2 Magic:341 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 40158: 07-11 20:35:11.135   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:33 Frame:0 Magic:342 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 40331: 07-11 20:35:11.257   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:34 Frame:1 Magic:343 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 40493: 07-11 20:35:11.378   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:35 Frame:2 Magic:344 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 40657: 07-11 20:35:11.497   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:36 Frame:0 Magic:345 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 40817: 07-11 20:35:11.618   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:37 Frame:1 Magic:346 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:63 u4AvgYcur:57
+	Line 40970: 07-11 20:35:11.741   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:38 Frame:2 Magic:347 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:57
+	Line 41166: 07-11 20:35:11.858   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:39 Frame:0 Magic:348 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 41337: 07-11 20:35:11.986   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:40 Frame:1 Magic:349 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 41478: 07-11 20:35:12.103   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:41 Frame:2 Magic:350 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 41642: 07-11 20:35:12.217   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:42 Frame:0 Magic:351 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 41803: 07-11 20:35:12.337   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:43 Frame:1 Magic:352 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 41970: 07-11 20:35:12.459   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:44 Frame:2 Magic:353 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 42138: 07-11 20:35:12.586   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:45 Frame:0 Magic:354 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 42312: 07-11 20:35:12.709   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:46 Frame:1 Magic:355 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 42470: 07-11 20:35:12.826   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:47 Frame:2 Magic:356 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 42664: 07-11 20:35:12.941   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:48 Frame:0 Magic:357 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 42827: 07-11 20:35:13.068   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:49 Frame:1 Magic:358 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 43002: 07-11 20:35:13.183   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:50 Frame:2 Magic:359 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 43167: 07-11 20:35:13.303   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:51 Frame:0 Magic:360 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 43325: 07-11 20:35:13.426   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:52 Frame:1 Magic:361 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 43489: 07-11 20:35:13.543   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:53 Frame:2 Magic:362 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 43650: 07-11 20:35:13.665   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:54 Frame:0 Magic:363 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 43819: 07-11 20:35:13.785   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:55 Frame:1 Magic:364 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 43990: 07-11 20:35:13.906   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:56 Frame:2 Magic:365 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 44150: 07-11 20:35:14.027   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:57 Frame:0 Magic:366 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 44325: 07-11 20:35:14.153   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:58 Frame:1 Magic:367 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 44488: 07-11 20:35:14.268   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:59 Frame:2 Magic:368 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 44655: 07-11 20:35:14.386   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:60 Frame:0 Magic:369 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 44795: 07-11 20:35:14.507   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:61 Frame:1 Magic:370 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 44974: 07-11 20:35:14.627   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:62 Frame:2 Magic:371 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 45158: 07-11 20:35:14.750   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:63 Frame:0 Magic:372 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 45342: 07-11 20:35:14.869   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:64 Frame:1 Magic:373 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 45505: 07-11 20:35:14.996   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:65 Frame:2 Magic:374 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 45670: 07-11 20:35:15.111   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:66 Frame:0 Magic:375 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 45842: 07-11 20:35:15.233   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:67 Frame:1 Magic:376 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:57
+	Line 46003: 07-11 20:35:15.352   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:68 Frame:2 Magic:377 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 46168: 07-11 20:35:15.477   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:69 Frame:0 Magic:378 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:64 u4CwvYpre:63 u4AvgYcur:57
+	Line 46333: 07-11 20:35:15.596   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:70 Frame:1 Magic:379 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:57
+	Line 46508: 07-11 20:35:15.716   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:71 Frame:2 Magic:380 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 46688: 07-11 20:35:15.844   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:72 Frame:0 Magic:381 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 46872: 07-11 20:35:15.956   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:73 Frame:1 Magic:382 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 47033: 07-11 20:35:16.076   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:74 Frame:2 Magic:383 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 47182: 07-11 20:35:16.199   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:75 Frame:0 Magic:384 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 47349: 07-11 20:35:16.321   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:76 Frame:1 Magic:385 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 47533: 07-11 20:35:16.439   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:77 Frame:2 Magic:386 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+	Line 47698: 07-11 20:35:16.559   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:78 Frame:0 Magic:387 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 47850: 07-11 20:35:16.677   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:79 Frame:1 Magic:388 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 48029: 07-11 20:35:16.800   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:80 Frame:2 Magic:389 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 48206: 07-11 20:35:16.918   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:81 Frame:0 Magic:390 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 48365: 07-11 20:35:17.037   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:82 Frame:1 Magic:391 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 48546: 07-11 20:35:17.161   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:83 Frame:2 Magic:392 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 48713: 07-11 20:35:17.280   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:84 Frame:0 Magic:393 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 48875: 07-11 20:35:17.400   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:85 Frame:1 Magic:394 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 49038: 07-11 20:35:17.520   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:86 Frame:2 Magic:395 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 49226: 07-11 20:35:17.643   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:87 Frame:0 Magic:396 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 49386: 07-11 20:35:17.762   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:88 Frame:1 Magic:397 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 49581: 07-11 20:35:17.883   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:89 Frame:2 Magic:398 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 49749: 07-11 20:35:18.005   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:90 Frame:0 Magic:399 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+	Line 49917: 07-11 20:35:18.123   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:91 Frame:1 Magic:400 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+	Line 50080: 07-11 20:35:18.246   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:92 Frame:2 Magic:401 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+	Line 50246: 07-11 20:35:18.366   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:93 Frame:0 Magic:402 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 50410: 07-11 20:35:18.486   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:94 Frame:1 Magic:403 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 50573: 07-11 20:35:18.607   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:95 Frame:2 Magic:404 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 50754: 07-11 20:35:18.727   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:96 Frame:0 Magic:405 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 50940: 07-11 20:35:18.846   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:97 Frame:1 Magic:406 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 51117: 07-11 20:35:18.989   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:98 Frame:2 Magic:407 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 51272: 07-11 20:35:19.087   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:99 Frame:0 Magic:408 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 51441: 07-11 20:35:19.209   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:100 Frame:1 Magic:409 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 51615: 07-11 20:35:19.331   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:101 Frame:2 Magic:410 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 51773: 07-11 20:35:19.449   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:102 Frame:0 Magic:411 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 51937: 07-11 20:35:19.569   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:103 Frame:1 Magic:412 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 52117: 07-11 20:35:19.691   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:104 Frame:2 Magic:413 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 52295: 07-11 20:35:19.810   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:105 Frame:0 Magic:414 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 52470: 07-11 20:35:19.931   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:106 Frame:1 Magic:415 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 52631: 07-11 20:35:20.052   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:107 Frame:2 Magic:416 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 52799: 07-11 20:35:20.172   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:108 Frame:0 Magic:417 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 52968: 07-11 20:35:20.303   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:109 Frame:1 Magic:418 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+	Line 53112: 07-11 20:35:20.412   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:110 Frame:2 Magic:419 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 53293: 07-11 20:35:20.538   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:111 Frame:0 Magic:420 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 53449: 07-11 20:35:20.658   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:112 Frame:1 Magic:421 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 53631: 07-11 20:35:20.777   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:113 Frame:2 Magic:422 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 53802: 07-11 20:35:20.897   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:114 Frame:0 Magic:423 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 53986: 07-11 20:35:21.018   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:115 Frame:1 Magic:424 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 54151: 07-11 20:35:21.138   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:116 Frame:2 Magic:425 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 54315: 07-11 20:35:21.258   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:117 Frame:0 Magic:426 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 54471: 07-11 20:35:21.377   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:118 Frame:1 Magic:427 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 54651: 07-11 20:35:21.497   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:119 Frame:2 Magic:428 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 54815: 07-11 20:35:21.618   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:120 Frame:0 Magic:429 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 54957: 07-11 20:35:21.737   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:121 Frame:1 Magic:430 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 55158: 07-11 20:35:21.878   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:122 Frame:2 Magic:431 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+	Line 55335: 07-11 20:35:21.986   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:123 Frame:0 Magic:432 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 55480: 07-11 20:35:22.118   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:124 Frame:1 Magic:433 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:55
+	Line 55661: 07-11 20:35:22.229   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:125 Frame:2 Magic:434 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 55825: 07-11 20:35:22.341   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:126 Frame:0 Magic:435 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 55974: 07-11 20:35:22.462   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:127 Frame:1 Magic:436 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:63 u4CwvYpre:63 u4AvgYcur:56
+	Line 56148: 07-11 20:35:22.583   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:128 Frame:2 Magic:437 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 56321: 07-11 20:35:22.705   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:129 Frame:0 Magic:438 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:62 u4CwvYpre:63 u4AvgYcur:56
+	Line 56488: 07-11 20:35:22.827   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:130 Frame:1 Magic:439 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:55
+	Line 56650: 07-11 20:35:22.942   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:131 Frame:2 Magic:440 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+	Line 56944: 07-11 20:35:23.062   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:132 Frame:0 Magic:441 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 57273: 07-11 20:35:23.180   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:133 Frame:1 Magic:442 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:53
+	Line 57553: 07-11 20:35:23.301   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:0 Cnt:134 Frame:2 Magic:443 ReSchedule:0 Exit:1 Skip:1 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:0 FaceWOCnt:62 TouchArea:0 u4CwvYcur:59 u4CwvYpre:63 u4AvgYcur:53
+	Line 58060: 07-11 20:35:23.427   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:1 Apply:1 Cnt:0 Frame:0 Magic:444 ReSchedule:1 Exit:0 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:1 AEMonitorStable:1 VdCnt:0 ISPdelay:0 FaceArea:1 FaceWOCnt:1 TouchArea:0 u4CwvYcur:60 u4CwvYpre:63 u4AvgYcur:54
+	Line 58328: 07-11 20:35:23.542   472 26004 D ae_mgr  : [monitorAndReschedule()] Calc:0 Apply:1 Cnt:1 Frame:1 Magic:445 ReSchedule:0 Exit:0 Skip:0 bStatChange:0 bAAASchedule:0 framePerAECycle:3 Stable:0 AEMonitorStable:0 VdCnt:1 ISPdelay:0 FaceArea:1 FaceWOCnt:2 TouchArea:0 u4CwvYcur:61 u4CwvYpre:63 u4AvgYcur:54
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+  
+  
+  
+  
+  
+07-11 20:35:22.954  1100 14320 I dvm_lock_sample: [system_server,1,Binder:1100_1C,17734,ActivityManagerService.java,9573,UserController.java,1735,100]	// It locked here for 17s+
+07-11 20:35:22.957  1100 14270 I dvm_lock_sample: [system_server,0,Binder:1100_18,17951,ActivityManagerService.java,23207,UserController.java,1735,100] // It locked here for 17s+
+07-11 20:35:22.970  1100  6782 I dvm_lock_sample: [system_server,1,Binder:1100_C,5698,Parcel.java,2670,-,2670,100]
+07-11 20:35:22.991  1100 14323 I dvm_lock_sample: [system_server,1,Binder:1100_1F,20637,ActivityManagerService.java,23095,-,23095,100]	// It locked here for 20s+
+07-11 20:35:22.995  1100  1206 I am_broadcast_discard_filter: [0,227641557,android.intent.action.TIME_TICK,1,140422654]
+
+07-11 20:35:23.237  1100  1206 I am_anr  : [0,5878,com.android.systemui,953695757,Broadcast of Intent { act=android.intent.action.TIME_TICK flg=0x50000014 launchParam=MultiScreenLaunchParams { mDisplayId=0 mBaseDisplayId=0 mFlags=0 } (has extras) }]
+
+
+从以上log可以看出AMS是因为UserController被锁等待了17秒多，所以大概是在20:35:04左右UserController被锁住的，
+再分析SsystemUI的log，也是从20:35:04左右开始被锁住了，
+
+	Line 30948: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: viewName : servicebox_clock
+	Line 30949: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#start
+	Line 39757: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#end
+
+
+再根据以上log，可以知道SystemUI在这个servicebox_clock的Page中被locked住的，
+
+/android/frameworks/base/packages/Keyguard/sec_function/servicebox/src/com/android/keyguard/servicebox/pages/clock/KeyguardClockPage.java 
+
+268    @Override
+269    public void refreshViews() {
+270        refreshTime();
+271    }
+
+153    public void refreshTime() {
+162        if (mClockView != null)
+163            mClockView.refreshTime(KeyguardTimePatterns.clockView12, KeyguardTimePatterns.clockView24, KeyguardTimePatterns.dateView);	//调用KeyguardSingleClockView的refreshTime方法
+164    }
+
+
+/android/frameworks/base/packages/Keyguard/sec_function/servicebox/src/com/android/keyguard/servicebox/pages/clock/KeyguardSingleClockView.java 
+
+143    @Override
+144    public void refreshTime(String clock12, String clock24, String date) {
+155        mTimeHourView.setFormat12Hour(clock12Hour);
+156        mTimeHourView.setFormat24Hour(clock24Hour);
+157        mTimeMinView.setFormat12Hour(clock12Min);
+158        mTimeMinView.setFormat24Hour(clock24Min);
+159        mTimeColonView.setFormat12Hour(separator);
+160        mTimeColonView.setFormat24Hour(separator);
+161        mDateView.setFormat12Hour(date);
+162        mDateView.setFormat24Hour(date);				//调用了4次setFormat24Hour()方法和4次setFormat12Hour()方法
+170    }
+
+
+49    private KeyguardTextClockForUser mTimeHourView;		//KeyguardTextClockForUser和KeyguardTextClock都是继承TextClock的类
+50    private KeyguardTextClockForUser mTimeColonView;
+51    private KeyguardTextClockForUser mTimeMinView;
+52    private KeyguardTextClock mDateView;
+
+
+
+
+
+
+/android/frameworks/base/core/java/android/widget/TextClock.java 
+
+321    @RemotableViewMethod
+322    public void setFormat12Hour(CharSequence format) {
+325        chooseFormat();											//调用chooseFormat()
+327    }
+
+
+379    @RemotableViewMethod
+380    public void setFormat24Hour(CharSequence format) {
+383        chooseFormat();											//调用chooseFormat()
+385    }
+
+504    private void chooseFormat(boolean handleTicker) {
+505        final boolean format24Requested = is24HourModeEnabled();	//调用is24HourModeEnabled()
+508
+524    }
+
+432    public boolean is24HourModeEnabled() {
+433        if (mShowCurrentUserTime) {
+434            return DateFormat.is24HourFormat(getContext(), ActivityManager.getCurrentUser());	// 这里调用ActivityManager.getCurrentUser()，就会锁住AMS去调用UserController
+435        } else {
+436            return DateFormat.is24HourFormat(getContext());
+437        }
+438    }
+
+
+
+
+
+
+
+
+
+/android/frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java 
+
+9538    public IIntentSender getIntentSender(int type,
+9539            String packageName, IBinder token, String resultWho,
+9540            int requestCode, Intent[] intents, String[] resolvedTypes,
+9541            int flags, Bundle bOptions, int userId) {
+
+
+9573        synchronized(this) {
+9574            int callingUid = Binder.getCallingUid();
+9575            int origUserId = userId;
+9576            userId = mUserController.handleIncomingUser(Binder.getCallingPid(), callingUid, userId,		// 这里
+
+9603            } catch (RemoteException e) {
+9604                throw new SecurityException(e);
+9605            }
+9606        }
+
+
+23241    public void finishReceiver(IBinder who, int resultCode, String resultData,
+23242            Bundle resultExtras, boolean resultAbort, /* { AppCore *//*int flags*/int queueIndex/* AppCore } */) {
+
+				synchronized(this) {                                                                       //还有这里
+23255                /* { AppCore */
+23256                // this is GED code. SEC uses more number of broadcast queues than GED.
+23257                //BroadcastQueue queue = (flags & Intent.FLAG_RECEIVER_FOREGROUND) != 0
+23258                //        ? mFgBroadcastQueue : mBgBroadcastQueue;
+23259                //r = queue.getMatchingOrderedReceiver(who);
+23260                r = mBridge.getMatchingOrderedReceiver(who, queueIndex);
+23261                /* AppCore } */
+23262                if (r != null) {
+23263                    doNext = r.queue.finishReceiverLocked(r, resultCode,
+23264                        resultData, resultExtras, resultAbort, true);
+23265                }
+23266            }
+
+
+
+
+
+
+
+
+
+
+
+
+
+	Line 30944: 07-11 20:35:04.558  5878  5878 D KeyguardUpdateMonitor: received broadcast android.intent.action.TIME_TICK, #start
+	Line 30945: 07-11 20:35:04.558  5878  5878 D KeyguardUpdateMonitor: received broadcast android.intent.action.TIME_TICK, #end
+	Line 30946: 07-11 20:35:04.559  5878  5878 D KeyguardUpdateMonitor: handleTimeUpdate#start : size=30
+	Line 30947: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: mPageCacheMap.size() : 2
+	Line 30948: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: viewName : servicebox_clock
+	Line 30949: 07-11 20:35:04.559  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#start
+	Line 39757: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#end
+	Line 39758: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: viewName : servicebox_music
+	Line 39759: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#start
+	Line 39760: 07-11 20:35:10.845  5878  5878 D KeyguardServiceBoxPageAdapter: refreshViews#end
+	Line 39761: 07-11 20:35:10.845  5878  5878 D KeyguardUpdateMonitor: handleTimeUpdate#end
+
+
+
+
+/android/frameworks/base/packages/Keyguard/sec_function/servicebox/src/com/android/keyguard/servicebox/pages/clock/KeyguardSingleClockView.java 
+
+
+143    @Override
+144    public void refreshTime(String clock12, String clock24, String date) {
+145        // P170105-05100, P170426-05178 : In some case, seperator is not just colon ":".
+146        // ex) Setting -> General management -> Language and input -> Srpski (Serbia SEE) or Dansk
+147        String clock12Split[] = clock12.split("[^a-zA-Z]");
+148        String clock24Split[] = clock24.split("[^a-zA-Z]");
+149        String clock12Hour = clock12Split[0], clock12Min = clock12Split[1];
+150        String clock24Hour = clock24Split[0], clock24Min = clock24Split[1];
+151
+152        int sepIndex = clock24.indexOf(clock24Min) - 1;
+153        String separator = clock24.substring(sepIndex, sepIndex + 1);
+154
+155        mTimeHourView.setFormat12Hour(clock12Hour);
+156        mTimeHourView.setFormat24Hour(clock24Hour);
+157        mTimeMinView.setFormat12Hour(clock12Min);
+158        mTimeMinView.setFormat24Hour(clock24Min);
+159        mTimeColonView.setFormat12Hour(separator);
+160        mTimeColonView.setFormat24Hour(separator);
+161        mDateView.setFormat12Hour(date);
+162        mDateView.setFormat24Hour(date);
+163
+164        updateContentDescription();
+165
+166        // Check Shamsi date.
+167        if (KeyguardRune.SUPPORT_PERSIAN_CALENDAR) {
+168            mDateShamsiView.setText(mPCalUtil.getDateInPersianCalendar());
+169        }
+170    }
+
+
+
+
+
+/android/frameworks/base/packages/Keyguard/sec_function/common/src/com/android/keyguard/KeyguardTextClockForUser.java 
+
+
+50    protected void onAttachedToWindow() {
+51        super.onAttachedToWindow();
+52        this.setShowCurrentUserTime(true); // Please do not use setShowCurrentUserTime() on onFinishInflate() in SecClockPages.
+53    }
+
+
+
+
+
+/android/frameworks/base/core/java/android/widget/TextClock.java 
+
+
+
+504    private void chooseFormat(boolean handleTicker) {
+505        final boolean format24Requested = is24HourModeEnabled();
+506
+507        LocaleData ld = LocaleData.get(getContext().getResources().getConfiguration().locale);
+508
+524    }
+
+432    public boolean is24HourModeEnabled() {
+433        if (mShowCurrentUserTime) {
+434            return DateFormat.is24HourFormat(getContext(), ActivityManager.getCurrentUser());		// here
+435        } else {
+436            return DateFormat.is24HourFormat(getContext());
+437        }
+438    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/android/frameworks/base/packages/SystemUI/src/com/android/systemui/statusbar/policy/SplitClockView.java
+
+
+
+44    private BroadcastReceiver mIntentReceiver = new BroadcastReceiver() {
+45        @Override
+46        public void onReceive(Context context, Intent intent) {
+47            final String action = intent.getAction();
+48            if (Intent.ACTION_TIME_CHANGED.equals(action)
+49                    || Intent.ACTION_TIMEZONE_CHANGED.equals(action)
+50                    || Intent.ACTION_LOCALE_CHANGED.equals(action)
+51                    || Intent.ACTION_CONFIGURATION_CHANGED.equals(action)
+52                    || Intent.ACTION_USER_SWITCHED.equals(action)) {
+53                updatePatterns();											//会不停调用吗？
+54            }
+55        }
+56    };
+
+62    @Override
+63    protected void onFinishInflate() {
+64        super.onFinishInflate();
+65        mTimeView = (TextClock) findViewById(R.id.time_view);
+66        mAmPmView = (TextClock) findViewById(R.id.am_pm_view);
+67        mAmPmViewFront = (TextClock) findViewById(R.id.am_pm_view_front);
+68        mTimeView.setShowCurrentUserTime(true);
+69        mAmPmView.setShowCurrentUserTime(true);
+70    }
+71
+72    @Override
+73    protected void onAttachedToWindow() {
+74        super.onAttachedToWindow();
+75
+76        IntentFilter filter = new IntentFilter();
+77        filter.addAction(Intent.ACTION_TIME_CHANGED);
+78        filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+79        filter.addAction(Intent.ACTION_LOCALE_CHANGED);
+80        filter.addAction(Intent.ACTION_CONFIGURATION_CHANGED);
+81        filter.addAction(Intent.ACTION_USER_SWITCHED);
+82        getContext().registerReceiverAsUser(mIntentReceiver, UserHandle.ALL, filter, null, null);
+83
+84        updatePatterns();
+85    }
+
+
